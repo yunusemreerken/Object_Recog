@@ -1,12 +1,37 @@
 import cv2
 import sys
-import torch
 import numpy as np
 import speech_recognition as sr
 from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from ultralytics import YOLO
+import pyttsx3
+import threading
+import queue
+
+
+# Sesli konuşma kuyruğu
+speak_queue = queue.Queue()
+
+def speak_worker():
+    while True:
+        text = speak_queue.get()
+        if text is None:
+            break
+        engine = pyttsx3.init()  # pyttsx3 motoru başlat
+        engine.setProperty('rate', 150)  # Konuşma hızını ayarlayabilirsin
+        engine.setProperty('volume', 1)  # Ses seviyesini ayarlayabilirsin (0.0 - 1.0)
+        engine.say(text)
+        engine.runAndWait()
+        speak_queue.task_done()
+
+
+# Thread oluştur ve başlat
+threading.Thread(target=speak_worker,daemon=True).start()
+
+def speak(text):
+    speak_queue.put(text)
 
 # YOLO modelini yükle
 model = YOLO("yolov8n.pt")
@@ -22,16 +47,21 @@ class VoiceCommandThread(QThread):
         with sr.Microphone() as source:
             print("Sesli komut bekleniyor...")
             self.command_signal.emit("Sesli komut bekleniyor...")
+            speak("sesli komut bekleniyor")
 
             try:
-                audio = recognizer.listen(source, timeout=5)  # 5 saniye dinle
+                audio = recognizer.listen(source)  # 5 saniye dinle
                 command = recognizer.recognize_google(audio, language="en-US").lower()
                 print(f"Algılanan komut: {command}")
                 self.command_signal.emit(f"Komut: {command}")
+                speak(f"Komut: {command}")  # Komutu sesli olarak ilet
             except sr.UnknownValueError:
                 self.command_signal.emit("Ses anlaşılamadı, tekrar deneyin.")
+                speak("Ses anlaşılamadı, tekrar deneyin.")  # Ses anlaşılamadı mesajı
+
             except sr.RequestError:
                 self.command_signal.emit("Google API bağlantı hatası.")
+                speak("Google API bağlantı hatası.")  # Bağlantı hatası mesajı
 
 class YOLOApp(QWidget):
     def __init__(self):
@@ -96,13 +126,16 @@ class YOLOApp(QWidget):
     def process_voice_command(self, command):
         """Sesli komuttan gelen veriyi işler"""
         self.voice_label.setText(command)
+        speak(command)
         for obj in TARGET_OBJECTS:
             if obj in command:
                 self.target_object = obj
                 self.voice_label.setText(f"Aranan nesne: {obj}")
+                speak(f"Aranan nesne: {obj}")
                 return
 
         self.voice_label.setText("Belirtilen nesne listede yok.")
+        speak("Belirtilen nesne listede yok.")
 
     def detect_objects(self, frame):
         """YOLO ile nesne tespiti yapar"""
@@ -126,9 +159,11 @@ class YOLOApp(QWidget):
                     cv2.putText(frame, f"{label} BULUNDU!", (x1, y1 - 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
                     self.result_label.setText(f"{label} bulundu!")
+                    speak(f"{label} bulundu!")
 
         if not detected_objects:
             self.result_label.setText("Nesne Bulunamadı")
+            speak("Nesne Bulunamadı")
 
     def update_frame(self):
         """Kameradan görüntüyü alır ve ekrana yansıtır"""
