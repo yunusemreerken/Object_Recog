@@ -1,38 +1,151 @@
 import cv2
+import sys
+import torch
+import numpy as np
+import speech_recognition as sr
+from PyQt5.QtWidgets import QApplication, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from ultralytics import YOLO
 
-# YOLOv8 modelini yükle (Önceden eğitilmiş model)
+# YOLO modelini yükle
 model = YOLO("yolov8n.pt")
 
-# Kamerayı başlat
-cap = cv2.VideoCapture(0)
+# Tanınacak nesneler
+TARGET_OBJECTS = ["cell phone", "clock", "key", "glass", "cup", "cat", "person", "people"]
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+class VoiceCommandThread(QThread):
+    command_signal = pyqtSignal(str)  # Komutları ana thread'e göndermek için sinyal
+    
+    def run(self):
+        recognizer = sr.Recognizer()
+        with sr.Microphone() as source:
+            print("Sesli komut bekleniyor...")
+            self.command_signal.emit("Sesli komut bekleniyor...")
 
-    # Model ile tahmin yap
-    results = model(frame)
+            try:
+                audio = recognizer.listen(source, timeout=5)  # 5 saniye dinle
+                command = recognizer.recognize_google(audio, language="en-US").lower()
+                print(f"Algılanan komut: {command}")
+                self.command_signal.emit(f"Komut: {command}")
+            except sr.UnknownValueError:
+                self.command_signal.emit("Ses anlaşılamadı, tekrar deneyin.")
+            except sr.RequestError:
+                self.command_signal.emit("Google API bağlantı hatası.")
 
-    # Sonuçları ekrana çiz
-    for result in results:
-        for box in result.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])  # Koordinatları al
-            label = model.names[int(box.cls[0])]  # Etiket al
-            score = box.conf[0].item()  # Güven skoru
+class YOLOApp(QWidget):
+    def __init__(self):
+        super().__init__()
 
-            # Eğer etiket "cell phone", "clock" veya "key" ise çiz
-            if label in ["cell phone", "clock", "key"]:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"{label} {score:.2f}", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        self.setWindowTitle("YOLOv8 Nesne Tanıma - Sesli Komut")
+        self.setGeometry(100, 100, 800, 600)
 
-    cv2.imshow("YOLOv8 Nesne Tanıma", frame)
+        # Video Label
+        self.video_label = QLabel(self)
 
-    # Çıkış için 'q' tuşuna bas
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        # Durum Metni
+        self.result_label = QLabel("Durum: Bekleniyor...", self)
+        self.voice_label = QLabel("Ses Komutu: Bekleniyor...", self)
 
-cap.release()
-cv2.destroyAllWindows()
+        # Butonlar
+        self.start_button = QPushButton("Kamerayı Aç", self)
+        self.start_button.clicked.connect(self.start_camera)
+
+        self.stop_button = QPushButton("Kamerayı Kapat", self)
+        self.stop_button.clicked.connect(self.stop_camera)
+
+        self.voice_button = QPushButton("Sesli Komut Ver", self)
+        self.voice_button.clicked.connect(self.listen_voice_command)
+
+        # Layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.video_label)
+        layout.addWidget(self.result_label)
+        layout.addWidget(self.voice_label)
+        layout.addWidget(self.start_button)
+        layout.addWidget(self.stop_button)
+        layout.addWidget(self.voice_button)
+        self.setLayout(layout)
+
+        # Kamera
+        self.cap = None
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+
+        # Sesli komut thread
+        self.voice_thread = VoiceCommandThread()
+        self.voice_thread.command_signal.connect(self.process_voice_command)
+        self.target_object = None  # Kullanıcının aradığı nesne
+
+    def start_camera(self):
+        """Kamerayı başlatır"""
+        self.cap = cv2.VideoCapture(0)
+        self.timer.start(30)
+
+    def stop_camera(self):
+        """Kamerayı durdurur"""
+        if self.cap:
+            self.cap.release()
+        self.timer.stop()
+        self.video_label.clear()
+
+    def listen_voice_command(self):
+        """Sesli komutu dinler"""
+        self.voice_thread.start()
+
+    def process_voice_command(self, command):
+        """Sesli komuttan gelen veriyi işler"""
+        self.voice_label.setText(command)
+        for obj in TARGET_OBJECTS:
+            if obj in command:
+                self.target_object = obj
+                self.voice_label.setText(f"Aranan nesne: {obj}")
+                return
+
+        self.voice_label.setText("Belirtilen nesne listede yok.")
+
+    def detect_objects(self, frame):
+        """YOLO ile nesne tespiti yapar"""
+        results = model(frame)
+        detected_objects = []
+
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])  # Koordinatları al
+                label = model.names[int(box.cls[0])]  # Etiket al
+                score = box.conf[0].item()  # Güven skoru
+
+                if label in TARGET_OBJECTS:
+                    detected_objects.append(f"{label} ({score:.2f})")
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{label} {score:.2f}", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # Eğer kullanıcı bir nesne arıyorsa ve bulunduysa ekranda mesaj ver
+                if self.target_object and label == self.target_object:
+                    cv2.putText(frame, f"{label} BULUNDU!", (x1, y1 - 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+                    self.result_label.setText(f"{label} bulundu!")
+
+        if not detected_objects:
+            self.result_label.setText("Nesne Bulunamadı")
+
+    def update_frame(self):
+        """Kameradan görüntüyü alır ve ekrana yansıtır"""
+        if self.cap:
+            ret, frame = self.cap.read()
+            if ret:
+                self.detect_objects(frame)  # Nesne tanıma işlemini yap
+                
+                # OpenCV görüntüsünü PyQt formatına çevir
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = frame.shape
+                bytes_per_line = ch * w
+                qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                self.video_label.setPixmap(QPixmap.fromImage(qimg))
+
+# Uygulamayı çalıştır
+app = QApplication(sys.argv)
+window = YOLOApp()
+window.show()
+sys.exit(app.exec_())
